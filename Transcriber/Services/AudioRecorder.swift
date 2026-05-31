@@ -20,6 +20,12 @@ final class AudioRecorder {
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+
+        guard format.sampleRate > 0 else {
+            throw NSError(domain: "AudioRecorder", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Audio input not ready (sample rate is 0) — audio device not initialized yet. Try again in a moment."
+            ])
+        }
         audioFile = try AVAudioFile(forWriting: url, settings: format.settings)
 
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in

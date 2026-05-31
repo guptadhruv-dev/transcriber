@@ -16,6 +16,14 @@ final class TranscriberModel {
     var isModelReady = false
     var ollamaStatus: OllamaStatus = .offline
     var launchAtLogin = LaunchAtLogin()
+    var lastError: String? = nil
+
+    func clearError() { lastError = nil }
+
+    private func recordError(_ detail: String) {
+        lastError = detail
+        print("[Transcriber] \(detail)")
+    }
 
     var refinementLevel: RefinementLevel = {
         let raw = UserDefaults.standard.string(forKey: "refinementLevel") ?? "quick"
@@ -43,7 +51,7 @@ final class TranscriberModel {
         statusMessage = "Loading models…"
         Task {
             do {
-                async let vadTask = VadManager(config: VadConfig(defaultThreshold: 0.75))
+                async let vadTask = VadManager(config: VadConfig(defaultThreshold: 0.65))
                 async let asrModelsTask = AsrModels.downloadAndLoad(version: .v2)
 
                 let loadedVad = try await vadTask
@@ -56,7 +64,10 @@ final class TranscriberModel {
                     statusMessage = "Ready"
                 }
             } catch {
-                await MainActor.run { statusMessage = "Model load failed" }
+                await MainActor.run {
+                    statusMessage = "Model load failed"
+                    recordError("Model load failed: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -71,9 +82,15 @@ final class TranscriberModel {
     private func wireInterruption() {
         recorder.onInterruption = { [weak self] in
             guard let self else { return }
+            let wasRecording = isRecording
             isRecording = false
             statusMessage = "Ready"
             resetRecorder()
+            if wasRecording {
+                startRecording()
+            } else {
+                recordError("Recording interrupted — audio device changed or became unavailable. Common at login.")
+            }
         }
     }
 
@@ -136,7 +153,10 @@ final class TranscriberModel {
             do {
                 try await requestMicrophonePermission()
             } catch {
-                await MainActor.run { statusMessage = "Mic access denied" }
+                await MainActor.run {
+                    statusMessage = "Mic access denied"
+                    recordError("Microphone access denied — grant permission in System Settings > Privacy > Microphone.")
+                }
                 return
             }
             await startEngine(retries: 1)
@@ -152,7 +172,10 @@ final class TranscriberModel {
             }
         } catch {
             guard retries > 0 else {
-                await MainActor.run { statusMessage = "Mic error" }
+                await MainActor.run {
+                    statusMessage = "Mic error"
+                    recordError("Audio engine failed to start: \(error.localizedDescription)")
+                }
                 return
             }
             try? await Task.sleep(for: .milliseconds(300))
@@ -162,7 +185,12 @@ final class TranscriberModel {
     }
 
     private func stopRecording() {
-        guard let url = recorder.stop() else { return }
+        guard let url = recorder.stop() else {
+            isRecording = false
+            statusMessage = "Ready"
+            recordError("Recording produced no audio file — audio device may have changed during recording.")
+            return
+        }
         isRecording = false
         statusMessage = "Transcribing…"
         let jobID = UUID()
@@ -212,6 +240,7 @@ final class TranscriberModel {
             await MainActor.run {
                 guard currentJobID == jobID, !isRecording else { return }
                 statusMessage = "Error"
+                recordError("Transcription failed: \(error.localizedDescription)")
             }
         }
     }
@@ -220,9 +249,9 @@ final class TranscriberModel {
         guard let vad else { return samples }
 
         var segConfig = VadSegmentationConfig.default
-        segConfig.minSpeechDuration = 0.15
+        segConfig.minSpeechDuration = 0.10
         segConfig.minSilenceDuration = 0.6
-        segConfig.speechPadding = 0.12
+        segConfig.speechPadding = 0.25
 
         do {
             let segments = try await vad.segmentSpeech(samples, config: segConfig)

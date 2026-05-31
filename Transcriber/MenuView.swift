@@ -7,9 +7,13 @@ struct MenuView: View {
     var body: some View {
         if !model.hotkey.accessibilityGranted {
             accessibilityWarning
+            Divider()
         }
-        Divider()
-
+        if let error = model.lastError {
+            errorBanner(error)
+            Divider()
+        }
+        
         Text(model.statusMessage)
             .padding(.vertical, 4)
 
@@ -48,13 +52,15 @@ struct MenuView: View {
 
         Divider()
 
-        Button("Shortcut: \(model.hotkey.config.displayString)") {
+        Button("Shortcut = \(model.hotkey.config.displayString)") {
             model.hotkey.isMuted = true
             ShortcutRecorder.shared.beginRecording { config in
                 model.hotkey.isMuted = false
                 if let config { model.hotkey.updateConfig(config) }
             }
         }
+        
+        Divider()
 
         Toggle("Launch at Login", isOn: Bindable(model).launchAtLogin.isEnabled)
 
@@ -80,6 +86,20 @@ struct MenuView: View {
         case .idle:    return .orange
         case .loaded:  return .green
         }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Last Error", systemImage: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.callout.weight(.medium))
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Clear") { model.clearError() }
+                .font(.caption)
+        }
+        .padding(.vertical, 4)
     }
 
     private var accessibilityWarning: some View {

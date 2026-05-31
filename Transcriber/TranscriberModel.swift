@@ -38,6 +38,8 @@ final class TranscriberModel {
     private let refiner = TextRefiner()
     private var vad: VadManager?
     private var currentJobID = UUID()
+    private var isStartingRecording = false
+    private var startAttemptID = UUID()
 
     init() {
         wireInterruption()
@@ -74,6 +76,7 @@ final class TranscriberModel {
 
     func toggleRecording() {
         guard isModelReady else { return }
+        guard !isStartingRecording else { return }
         isRecording ? stopRecording() : startRecording()
     }
 
@@ -82,19 +85,21 @@ final class TranscriberModel {
     private func wireInterruption() {
         recorder.onInterruption = { [weak self] in
             guard let self else { return }
-            let wasRecording = isRecording
+            let wasActive = isRecording || isStartingRecording
+            startAttemptID = UUID()
+            isStartingRecording = false
             isRecording = false
             statusMessage = "Ready"
             resetRecorder()
-            if wasRecording {
-                startRecording()
-            } else {
-                recordError("Recording interrupted — audio device changed or became unavailable. Common at login.")
+            hotkey.refresh()
+            if wasActive {
+                recordError("Recording stopped because the audio input changed, disconnected, or went to sleep. Wake the mic and press the shortcut again.")
             }
         }
     }
 
     private func resetRecorder() {
+        recorder.reset(deleteRecording: true)
         recorder = AudioRecorder()
         wireInterruption()
     }
@@ -104,15 +109,26 @@ final class TranscriberModel {
     private func observeSleepWake() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self, isRecording else { return }
+            guard let self, isRecording || isStartingRecording else { return }
+            startAttemptID = UUID()
             if let url = recorder.stop() {
                 try? FileManager.default.removeItem(at: url)
             }
+            isStartingRecording = false
             isRecording = false
             statusMessage = "Ready"
+            resetRecorder()
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.resetRecorder()
+            guard let self else { return }
+            startAttemptID = UUID()
+            isStartingRecording = false
+            isRecording = false
+            if isModelReady {
+                statusMessage = "Ready"
+            }
+            resetRecorder()
+            hotkey.recoverAfterWake()
         }
     }
 
@@ -149,48 +165,79 @@ final class TranscriberModel {
     // MARK: - Recording
 
     private func startRecording() {
+        guard !isStartingRecording, !isRecording else { return }
+        let attemptID = UUID()
+        startAttemptID = attemptID
+        isStartingRecording = true
+        statusMessage = "Starting mic…"
+
         Task {
             do {
                 try await requestMicrophonePermission()
             } catch {
                 await MainActor.run {
+                    guard startAttemptID == attemptID else { return }
+                    isStartingRecording = false
                     statusMessage = "Mic access denied"
                     recordError("Microphone access denied — grant permission in System Settings > Privacy > Microphone.")
                 }
                 return
             }
-            await startEngine(retries: 1)
+            await startEngine(attemptID: attemptID, attempt: 1, maxAttempts: 6)
         }
     }
 
-    private func startEngine(retries: Int) async {
+    private func startEngine(attemptID: UUID, attempt: Int, maxAttempts: Int) async {
+        let shouldContinue = await MainActor.run {
+            startAttemptID == attemptID && isStartingRecording && !isRecording
+        }
+        guard shouldContinue else { return }
+
         do {
-            _ = try recorder.start()
+            _ = try await MainActor.run { try recorder.start() }
             await MainActor.run {
+                guard startAttemptID == attemptID, isStartingRecording else {
+                    _ = recorder.stop()
+                    return
+                }
+                isStartingRecording = false
                 isRecording = true
                 statusMessage = "Listening…"
             }
         } catch {
-            guard retries > 0 else {
+            let canRetry = await MainActor.run { () -> Bool in
+                guard startAttemptID == attemptID, isStartingRecording else { return false }
+                resetRecorder()
+                return attempt < maxAttempts
+            }
+
+            guard canRetry else {
                 await MainActor.run {
+                    guard startAttemptID == attemptID else { return }
+                    isStartingRecording = false
+                    isRecording = false
                     statusMessage = "Mic error"
-                    recordError("Audio engine failed to start: \(error.localizedDescription)")
+                    recordError("Audio engine failed to start after \(maxAttempts) attempts: \(error.localizedDescription)")
                 }
                 return
             }
-            try? await Task.sleep(for: .milliseconds(300))
-            await MainActor.run { resetRecorder() }
-            await startEngine(retries: retries - 1)
+
+            let delay = min(1_500, attempt * 300)
+            try? await Task.sleep(for: .milliseconds(delay))
+            await startEngine(attemptID: attemptID, attempt: attempt + 1, maxAttempts: maxAttempts)
         }
     }
 
     private func stopRecording() {
+        startAttemptID = UUID()
         guard let url = recorder.stop() else {
+            isStartingRecording = false
             isRecording = false
             statusMessage = "Ready"
             recordError("Recording produced no audio file — audio device may have changed during recording.")
             return
         }
+        isStartingRecording = false
         isRecording = false
         statusMessage = "Transcribing…"
         let jobID = UUID()

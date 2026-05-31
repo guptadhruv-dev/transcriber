@@ -56,6 +56,8 @@ final class HotkeyService {
     var isMuted = false
 
     private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var runLoop: CFRunLoop?
     private weak var model: TranscriberModel?
 
     func start(model: TranscriberModel) {
@@ -65,20 +67,49 @@ final class HotkeyService {
     }
 
     func stop() {
-        guard let tap = eventTap else { return }
-        CGEvent.tapEnable(tap: tap, enable: false)
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource, let runLoop {
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        }
+        runLoopSource = nil
+        runLoop = nil
         eventTap = nil
     }
 
     func retryInstall() {
-        stop()
         installTap()
+    }
+
+    func refresh() {
+        accessibilityGranted = AXIsProcessTrusted()
+        guard accessibilityGranted else {
+            stop()
+            return
+        }
+
+        guard let tap = eventTap, CFMachPortIsValid(tap) else {
+            installTap()
+            return
+        }
+
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    func recoverAfterWake() {
+        refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.refresh()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.refresh()
+        }
     }
 
     func updateConfig(_ newConfig: HotkeyConfig) {
         config = newConfig
         newConfig.save()
-        stop()
         installTap()
     }
 
@@ -88,6 +119,7 @@ final class HotkeyService {
     }
 
     private func installTap() {
+        stop()
         accessibilityGranted = AXIsProcessTrusted()
         guard accessibilityGranted else { return }
 
@@ -109,6 +141,7 @@ final class HotkeyService {
                     if let tap = service.eventTap {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
+                    DispatchQueue.main.async { service.refresh() }
                     return nil
                 }
 
@@ -137,7 +170,10 @@ final class HotkeyService {
 
         eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        let targetRunLoop = CFRunLoopGetMain()
+        CFRunLoopAddSource(targetRunLoop, source, .commonModes)
+        runLoopSource = source
+        runLoop = targetRunLoop
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 }

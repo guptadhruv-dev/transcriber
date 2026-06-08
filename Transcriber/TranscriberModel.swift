@@ -34,6 +34,7 @@ final class TranscriberModel {
 
     let hotkey = HotkeyService()
     private var recorder = AudioRecorder()
+    private let mediaController = MediaController()
     private let asr = AsrManager()
     private let refiner = TextRefiner()
     private var vad: VadManager?
@@ -89,11 +90,12 @@ final class TranscriberModel {
             startAttemptID = UUID()
             isStartingRecording = false
             isRecording = false
+            mediaController.resumeIfPaused()
             statusMessage = "Ready"
             resetRecorder()
             hotkey.refresh()
             if wasActive {
-                recordError("Recording stopped because the audio input changed, disconnected, or went to sleep. Wake the mic and press the shortcut again.")
+                recordError("Audio input was lost and could not be recovered. Reconnect the device and press the shortcut again.")
             }
         }
     }
@@ -116,6 +118,7 @@ final class TranscriberModel {
             }
             isStartingRecording = false
             isRecording = false
+            mediaController.resumeIfPaused()
             statusMessage = "Ready"
             resetRecorder()
         }
@@ -166,6 +169,7 @@ final class TranscriberModel {
 
     private func startRecording() {
         guard !isStartingRecording, !isRecording else { return }
+        mediaController.pauseIfPlaying()
         let attemptID = UUID()
         startAttemptID = attemptID
         isStartingRecording = true
@@ -178,6 +182,7 @@ final class TranscriberModel {
                 await MainActor.run {
                     guard startAttemptID == attemptID else { return }
                     isStartingRecording = false
+                    mediaController.resumeIfPaused()
                     statusMessage = "Mic access denied"
                     recordError("Microphone access denied — grant permission in System Settings > Privacy > Microphone.")
                 }
@@ -216,6 +221,7 @@ final class TranscriberModel {
                     guard startAttemptID == attemptID else { return }
                     isStartingRecording = false
                     isRecording = false
+                    mediaController.resumeIfPaused()
                     statusMessage = "Mic error"
                     recordError("Audio engine failed to start after \(maxAttempts) attempts: \(error.localizedDescription)")
                 }
@@ -230,6 +236,7 @@ final class TranscriberModel {
 
     private func stopRecording() {
         startAttemptID = UUID()
+        mediaController.resumeIfPaused()
         guard let url = recorder.stop() else {
             isStartingRecording = false
             isRecording = false

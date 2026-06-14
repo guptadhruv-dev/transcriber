@@ -37,21 +37,6 @@ struct MenuView: View {
 
         Divider()
 
-        Picker("Refinement Effort", selection: Bindable(model).refinementLevel) {
-            ForEach(RefinementLevel.allCases) { level in
-                Text(level.label).tag(level)
-            }
-        }
-
-        if model.refinementLevel != .off {
-            Text(ollamaStatusLabel)
-                .font(.caption)
-                .foregroundStyle(ollamaStatusColor)
-                .padding(.horizontal, 8)
-        }
-
-        Divider()
-
         Button("Shortcut = \(model.hotkey.config.displayString)") {
             model.hotkey.isMuted = true
             ShortcutRecorder.shared.beginRecording { config in
@@ -70,22 +55,6 @@ struct MenuView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
-    }
-
-    private var ollamaStatusLabel: String {
-        switch model.ollamaStatus {
-        case .offline: return "Ollama: offline"
-        case .idle:    return "Ollama: idle"
-        case .loaded:  return "Ollama: loaded"
-        }
-    }
-
-    private var ollamaStatusColor: Color {
-        switch model.ollamaStatus {
-        case .offline: return .red
-        case .idle:    return .orange
-        case .loaded:  return .green
-        }
     }
 
     private func errorBanner(_ message: String) -> some View {

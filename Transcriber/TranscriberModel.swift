@@ -3,10 +3,6 @@ import AVFoundation
 import FluidAudio
 import Accelerate
 
-enum OllamaStatus {
-    case offline, idle, loaded
-}
-
 @Observable
 final class TranscriberModel {
 
@@ -14,7 +10,6 @@ final class TranscriberModel {
     var statusMessage = "Ready"
     var lastTranscript = ""
     var isModelReady = false
-    var ollamaStatus: OllamaStatus = .offline
     var launchAtLogin = LaunchAtLogin()
     var lastError: String? = nil
 
@@ -25,18 +20,9 @@ final class TranscriberModel {
         print("[Transcriber] \(detail)")
     }
 
-    var refinementLevel: RefinementLevel = {
-        let raw = UserDefaults.standard.string(forKey: "refinementLevel") ?? "quick"
-        return RefinementLevel(rawValue: raw) ?? .quick
-    }() {
-        didSet { UserDefaults.standard.set(refinementLevel.rawValue, forKey: "refinementLevel") }
-    }
-
     let hotkey = HotkeyService()
     private var recorder = AudioRecorder()
-    private let mediaController = MediaController()
     private let asr = AsrManager()
-    private let refiner = TextRefiner()
     private var vad: VadManager?
     private var currentJobID = UUID()
     private var isStartingRecording = false
@@ -46,7 +32,6 @@ final class TranscriberModel {
         wireInterruption()
         activate()
         observeSleepWake()
-        startOllamaPolling()
     }
 
     func activate() {
@@ -90,7 +75,6 @@ final class TranscriberModel {
             startAttemptID = UUID()
             isStartingRecording = false
             isRecording = false
-            mediaController.resumeIfPaused()
             statusMessage = "Ready"
             resetRecorder()
             hotkey.refresh()
@@ -118,7 +102,6 @@ final class TranscriberModel {
             }
             isStartingRecording = false
             isRecording = false
-            mediaController.resumeIfPaused()
             statusMessage = "Ready"
             resetRecorder()
         }
@@ -135,41 +118,10 @@ final class TranscriberModel {
         }
     }
 
-    // MARK: - Ollama Status Polling
-
-    private func startOllamaPolling() {
-        Task {
-            while true {
-                await checkOllamaStatus()
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
-    }
-
-    private func checkOllamaStatus() async {
-        guard let url = URL(string: "http://localhost:11434/api/ps") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 3)
-        req.httpMethod = "GET"
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                await MainActor.run { ollamaStatus = .offline }
-                return
-            }
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let models = json?["models"] as? [[String: Any]] ?? []
-            let loaded = models.contains { ($0["name"] as? String)?.hasPrefix("qwen3:8b") == true }
-            await MainActor.run { ollamaStatus = loaded ? .loaded : .idle }
-        } catch {
-            await MainActor.run { ollamaStatus = .offline }
-        }
-    }
-
     // MARK: - Recording
 
     private func startRecording() {
         guard !isStartingRecording, !isRecording else { return }
-        mediaController.pauseIfPlaying()
         let attemptID = UUID()
         startAttemptID = attemptID
         isStartingRecording = true
@@ -182,7 +134,6 @@ final class TranscriberModel {
                 await MainActor.run {
                     guard startAttemptID == attemptID else { return }
                     isStartingRecording = false
-                    mediaController.resumeIfPaused()
                     statusMessage = "Mic access denied"
                     recordError("Microphone access denied — grant permission in System Settings > Privacy > Microphone.")
                 }
@@ -221,7 +172,6 @@ final class TranscriberModel {
                     guard startAttemptID == attemptID else { return }
                     isStartingRecording = false
                     isRecording = false
-                    mediaController.resumeIfPaused()
                     statusMessage = "Mic error"
                     recordError("Audio engine failed to start after \(maxAttempts) attempts: \(error.localizedDescription)")
                 }
@@ -236,7 +186,6 @@ final class TranscriberModel {
 
     private func stopRecording() {
         startAttemptID = UUID()
-        mediaController.resumeIfPaused()
         guard let url = recorder.stop() else {
             isStartingRecording = false
             isRecording = false
@@ -274,22 +223,13 @@ final class TranscriberModel {
             var decoderState = TdtDecoderState.make(decoderLayers: await asr.decoderLayerCount)
             let result = try await asr.transcribe(speechSamples, decoderState: &decoderState)
 
-            let level = await MainActor.run { refinementLevel }
-            if level != .off {
-                await MainActor.run {
-                    guard currentJobID == jobID, !isRecording else { return }
-                    statusMessage = "Refining…"
-                }
-            }
-            let finalText = await refiner.refine(result.text, level: level)
-
             let didCommit = await MainActor.run { () -> Bool in
                 guard currentJobID == jobID, !isRecording else { return false }
-                lastTranscript = finalText
+                lastTranscript = result.text
                 statusMessage = "Ready"
                 return true
             }
-            if didCommit { await pasteToActiveField(finalText) }
+            if didCommit { await pasteToActiveField(result.text) }
         } catch {
             await MainActor.run {
                 guard currentJobID == jobID, !isRecording else { return }
